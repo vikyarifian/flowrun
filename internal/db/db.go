@@ -26,3 +26,37 @@ CREATE TABLE IF NOT EXISTS flowrun_history (
 );
 `
 
+func AcquireLock(db *sql.DB, jobKey string, pid int) (bool, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	var existingPid int
+	var acquiredAt string
+	err = tx.QueryRow("SELECT pid, acquired_at FROM flowrun_locks WHERE job_key = ?", jobKey).Scan(&existingPid, &acquiredAt)
+	if err == nil {
+		if isProcessAlive(existingPid) {
+			return false, nil
+		}
+		_, err = tx.Exec("DELETE FROM flowrun_locks WHERE job_key = ?", jobKey)
+		if err != nil {
+			return false, err
+		}
+	} else if err != sql.ErrNoRows {
+		return false, err
+	}
+
+	_, err = tx.Exec("INSERT INTO flowrun_locks (job_key, acquired_at, pid) VALUES (?, ?, ?)", jobKey, time.Now().Format("2006-01-02 15:04:05"), pid)
+	if err != nil {
+		return false, err
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
