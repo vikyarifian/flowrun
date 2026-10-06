@@ -60,3 +60,23 @@ func AcquireLock(db *sql.DB, jobKey string, pid int) (bool, error) {
 	return true, nil
 }
 
+func ReleaseLock(db *sql.DB, jobKey string, pid int) error {
+	_, err := db.Exec("DELETE FROM flowrun_locks WHERE job_key = ? AND pid = ?", jobKey, pid)
+	return err
+}
+
+func isProcessAlive(pid int) bool {
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	
+	err = process.Signal(syscall.Signal(0))
+	if err == nil {
+		return true
+	}
+	if err == syscall.EPERM {
+		return true
+	}
+	return false
+}
