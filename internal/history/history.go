@@ -76,3 +76,56 @@ func GetHistory(db *sql.DB, keyFilter, statusFilter, fromDate, toDate string) ([
 }
 
 // FormatAndPrintHistory displays the historical runs in a clean table format on the terminal.
+func FormatAndPrintHistory(w io.Writer, records []RunRecord) {
+	if len(records) == 0 {
+		fmt.Fprintln(w, "No execution records found matching current criteria.")
+		return
+	}
+
+	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
+	fmt.Fprintln(tw, "ID\tJOB KEY\tSTATUS\tSTARTED AT\tDURATION (ms)\tCOMMAND")
+
+	type failedRun struct {
+		id     int
+		jobKey string
+		output string
+	}
+	var failedLogs []failedRun
+
+	for _, r := range records {
+		cmdStr := r.Command
+		if len(cmdStr) > 40 {
+			cmdStr = cmdStr[:37] + "..."
+		}
+		fmt.Fprintf(tw, "%d\t%s\t%d\t%s\t%d\t%s\n", r.ID, r.JobKey, r.StatusCode, r.StartedAt, r.DurationMs, cmdStr)
+
+		if r.StatusCode != 0 {
+			failedLogs = append(failedLogs, failedRun{id: r.ID, jobKey: r.JobKey, output: r.Output})
+		}
+	}
+	tw.Flush()
+
+	if len(failedLogs) > 0 {
+		fmt.Fprintln(w, "\n--- RECENT FAILURE LOG DETAILS ---")
+		for _, f := range failedLogs {
+			fmt.Fprintf(w, "\n[ID %d] Job Key: %s\n", f.id, f.jobKey)
+			fmt.Fprintln(w, "Output:")
+			if f.output == "" {
+				fmt.Fprintln(w, "(no terminal output logged)")
+			} else {
+				fmt.Fprintln(w, f.output)
+			}
+			fmt.Fprintln(w, "----------------------------------")
+		}
+	}
+}
+
+// PurgeOldRecords deletes historical execution records older than the specified retention days.
+func PurgeOldRecords(db *sql.DB, days int) (int64, error) {
+	cutoff := time.Now().AddDate(0, 0, -days).Format("2006-01-02 15:04:05")
+	result, err := db.Exec("DELETE FROM flowrun_history WHERE started_at < ?", cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
