@@ -251,3 +251,107 @@ func purgeCmd(db *sql.DB) {
 	fmt.Printf("Successfully purged %d log record(s) older than %d days (cutoff date: %s).\n", rowsAffected, *daysFlag, cutoff)
 }
 
+func acquireLock(db *sql.DB, jobKey string, pid int) (bool, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	var existingPid int
+	var acquiredAt string
+	err = tx.QueryRow("SELECT pid, acquired_at FROM flowrun_locks WHERE job_key = ?", jobKey).Scan(&existingPid, &acquiredAt)
+	if err == nil {
+		if isProcessAlive(existingPid) {
+			return false, nil
+		}
+		_, err = tx.Exec("DELETE FROM flowrun_locks WHERE job_key = ?", jobKey)
+		if err != nil {
+			return false, err
+		}
+	} else if err != sql.ErrNoRows {
+		return false, err
+	}
+
+	_, err = tx.Exec("INSERT INTO flowrun_locks (job_key, acquired_at, pid) VALUES (?, ?, ?)", jobKey, time.Now().Format("2006-01-02 15:04:05"), pid)
+	if err != nil {
+		return false, err
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func releaseLock(db *sql.DB, jobKey string, pid int) {
+	_, err := db.Exec("DELETE FROM flowrun_locks WHERE job_key = ? AND pid = ?", jobKey, pid)
+	if err != nil {
+		log.Printf("Warning: failed to release database lock for '%s': %v\n", jobKey, err)
+	}
+}
+
+func executeCommand(commandStr string) (int, string) {
+	var buf bytes.Buffer
+	mwStdout := io.MultiWriter(os.Stdout, &buf)
+	mwStderr := io.MultiWriter(os.Stderr, &buf)
+
+	cmd := exec.Command("sh", "-c", commandStr)
+	cmd.Stdout = mwStdout
+	cmd.Stderr = mwStderr
+
+	err := cmd.Run()
+	statusCode := 0
+	if err != nil {
+		if exitError, ok := err.(*exec.ExitError); ok {
+			statusCode = exitError.ExitCode()
+		} else {
+			statusCode = -1
+			fmt.Fprintf(mwStderr, "\n[flowrun process error] Execution failed: %v\n", err)
+		}
+	}
+	return statusCode, buf.String()
+}
+
+func isProcessAlive(pid int) bool {
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	
+	err = process.Signal(syscall.Signal(0))
+	if err == nil {
+		return true
+	}
+	if err == syscall.EPERM {
+		return true
+	}
+	return false
+}
+
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
+}
+
+func printHelp() {
+	fmt.Println(`flowrun - Manage locks and log execution histories for critical batch processes
+
+Usage:
+  flowrun run --key <job_key> --cmd <shell_command>
+  flowrun history [--key <job_key>] [--status <status_code>] [--from <YYYY-MM-DD>] [--to <YYYY-MM-DD>]
+  flowrun purge --days <retention_period_days>
+
+Examples:
+  # Run daily tagihan invoice sync safely without double run conflicts
+  flowrun run --key "tagihan-harian" --cmd "php /var/www/html/artisan sync:tagihan"
+
+  # Check history logs for overtime calculation batch script (lembur)
+  flowrun history --key "lembur-calc"
+
+  # Delete logs older than 45 days
+  flowrun purge --days 45`)
+}
